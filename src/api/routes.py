@@ -4,7 +4,7 @@ import json
 import traceback
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 
 from src.api.models import (
     HealthResponse,
@@ -26,7 +26,14 @@ from src.retrieval.retriever import retrieve
 from src.utils.config import settings
 from src.utils.logger import logger
 
-router = APIRouter()
+
+
+def require_key(x_api_key: str = Header(default="")):
+    if settings.api_key and x_api_key != settings.api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+
+router = APIRouter(dependencies=[Depends(require_key)])
 
 # In-memory store for extracted transactions (keyed by doc_id).
 # Replace with a proper DB (SQLite / Postgres) for production.
@@ -35,8 +42,9 @@ _transaction_store: dict[str, list] = {}
 for _f in Path(settings.processed_dir).glob("*.json"):
     try:
         _transaction_store[_f.stem] = json.loads(_f.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Skipping unreadable {_f}: {e}")
+# ponytail: per-process dict; use SQLite/Postgres before running multiple workers
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
@@ -45,15 +53,16 @@ async def health():
 
 
 @router.post("/ingest", response_model=IngestResponse, tags=["ingestion"])
-async def ingest_pdf(file: UploadFile = File(...)):
+def ingest_pdf(file: UploadFile = File(...)):
     """Upload a PDF statement and process it end-to-end."""
-    if not file.filename.endswith(".pdf"):
+    name = Path(file.filename or "").name  # strip any path components
+    if not name.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
     try:
         # Save upload
-        save_path = Path(settings.raw_pdf_dir) / file.filename
-        save_path.write_bytes(await file.read())
+        save_path = Path(settings.raw_pdf_dir) / name
+        save_path.write_bytes(file.file.read())
         logger.info(f"Saved upload: {save_path}")
 
         # Ingestion pipeline
@@ -78,7 +87,7 @@ async def ingest_pdf(file: UploadFile = File(...)):
 
         return IngestResponse(
             doc_id=doc.doc_id,
-            filename=file.filename,
+            filename=name,
             total_pages=doc.total_pages,
             chunks_stored=len(chunks),
             transactions_found=len(transactions),
@@ -90,7 +99,7 @@ async def ingest_pdf(file: UploadFile = File(...)):
 
 
 @router.post("/query", response_model=QueryResponse, tags=["query"])
-async def query_transactions(body: QueryRequest):
+def query_transactions(body: QueryRequest):
     """Ask a natural-language question about transaction data."""
     try:
         # Structured path: exact calculations over extracted transactions.
@@ -105,8 +114,8 @@ async def query_transactions(body: QueryRequest):
             for raw in result["transactions"]:
                 try:
                     safe.append(TransactionOut(**raw))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Dropped invalid transaction: {e}")
             return QueryResponse(
                 answer=result["answer"],
                 transactions=safe,
@@ -137,8 +146,8 @@ async def query_transactions(body: QueryRequest):
         for raw in result.get("transactions", []):
             try:
                 safe_txns.append(TransactionOut(**raw))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Dropped invalid transaction: {e}")
 
         return QueryResponse(
             answer=result["answer"],
@@ -155,7 +164,7 @@ async def query_transactions(body: QueryRequest):
 
 
 @router.get("/transactions", response_model=TransactionListResponse, tags=["transactions"])
-async def list_transactions(doc_id: str | None = None):
+def list_transactions(doc_id: str | None = None):
     """Return all extracted transactions, optionally filtered by document."""
     raw: list[dict] = []
     if doc_id:
@@ -181,7 +190,7 @@ async def list_transactions(doc_id: str | None = None):
     response_model=TransactionOut,
     tags=["transactions"],
 )
-async def get_transaction(transaction_id: str):
+def get_transaction(transaction_id: str):
     """Retrieve a single transaction by ID."""
     for txns in _transaction_store.values():
         for t in txns:

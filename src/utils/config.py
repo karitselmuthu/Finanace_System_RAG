@@ -30,8 +30,10 @@ class Settings(BaseSettings):
 
     # API
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 8025
     log_level: str = "INFO"
+    cors_origins: list[str] = ["http://localhost:8025", "http://127.0.0.1:8025"]
+    api_key: str = ""  # if set, /ingest /query /transactions require X-API-Key
 
     # Data Paths
     raw_pdf_dir: str = "data/raw"
